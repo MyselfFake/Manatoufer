@@ -1,24 +1,39 @@
-import os
+﻿import os
 import re
 import random
 import asyncio
 import threading
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-TOKEN = os.environ.get("TOKEN")
+TOKEN = (os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or "").strip()
 
 GUILD_ID_RAW = os.environ.get("GUILD_ID")
 GUILD_ID = int(GUILD_ID_RAW) if GUILD_ID_RAW and GUILD_ID_RAW.isdigit() else None
 
 CHECK_EMOJI = "\u2705"
-EVENT_CATEGORY_NAME = "━━━━━━━━━━ 🎯 PLANIFICATION STRATEGIQUE ━━━━━━━━━━"
-EVENT_CHANNEL_EMOJIS = ["🎯", "📌", "🚀", "🔥", "⭐", "✅", "🧭", "📣", "🎉"]
-DELETE_CONFIRM_EMOJI = "✅"
-DELETE_CANCEL_EMOJI = "❌"
-EVENT_CHANNEL_WELCOME_MESSAGE = "C'est ici que vous pouvez échanger et vous organiser pour cet évènement."
+EVENT_CATEGORY_NAME = (
+    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501 "
+    "\U0001F3AF PLANIFICATION STRATEGIQUE "
+    "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501"
+)
+EVENT_CHANNEL_EMOJIS = [
+    "\U0001F3AF",
+    "\U0001F4CC",
+    "\U0001F680",
+    "\U0001F525",
+    "\u2B50",
+    "\u2705",
+    "\U0001F9ED",
+    "\U0001F4E3",
+    "\U0001F389",
+]
+DELETE_CONFIRM_EMOJI = "\u2705"
+DELETE_CANCEL_EMOJI = "\u274C"
+EVENT_CHANNEL_WELCOME_MESSAGE = "C'est ici que vous pouvez echanger et vous organiser pour cet evenement."
 
 intents = discord.Intents.default()
 intents.members = True
@@ -34,12 +49,86 @@ active_events = {}
 event_resources = {}
 # event_key -> asyncio.Lock (protege la creation locale contre la concurrence)
 event_setup_locks: dict[str, asyncio.Lock] = {}
+moomle_polls: dict[str, dict[str, dict]] = {}
+moomle_lock: asyncio.Lock = asyncio.Lock()
+
+MOOMLE_STORAGE_FILE = "moomle_polls.json"
+MAX_MOOMLE_SLOTS = 20
+MAX_MOOMLE_SESSIONS = 25
+MM_EVENT_PREFIX = "mm_"
+MOOMLE_SLOT_REACTION_EMOJIS = [
+    "🇦",
+    "🇧",
+    "🇨",
+    "🇩",
+    "🇪",
+    "🇫",
+    "🇬",
+    "🇭",
+    "🇮",
+    "🇯",
+    "🇰",
+    "🇱",
+    "🇲",
+    "🇳",
+    "🇴",
+    "🇵",
+    "🇶",
+    "🇷",
+    "🇸",
+    "🇹",
+]
 
 commands_synced = False
 
 
 def normalize_event_key(event_name: str) -> str:
     return event_name.strip().lower()
+
+
+def with_mm_event_prefix(name: str) -> str:
+    cleaned = name.strip()
+    if cleaned.lower().startswith(MM_EVENT_PREFIX):
+        return cleaned
+    return f"{MM_EVENT_PREFIX}{cleaned}"
+
+
+def normalize_event_category_name(name: str) -> str:
+    normalized = name.upper()
+    normalized = (
+        normalized.replace("É", "E")
+        .replace("È", "E")
+        .replace("Ê", "E")
+        .replace("Ë", "E")
+        .replace("À", "A")
+        .replace("Â", "A")
+        .replace("Î", "I")
+        .replace("Ï", "I")
+        .replace("Ô", "O")
+        .replace("Û", "U")
+        .replace("Ü", "U")
+    )
+    normalized = re.sub(r"[^A-Z0-9]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def is_event_category_name(name: str) -> bool:
+    normalized = normalize_event_category_name(name)
+    return "PLANIFICATION" in normalized and "STRATEGIQUE" in normalized
+
+
+def find_event_category(guild: discord.Guild) -> discord.CategoryChannel | None:
+    category = discord.utils.get(guild.categories, name=EVENT_CATEGORY_NAME)
+    if category is not None:
+        return category
+
+    candidates = [candidate for candidate in guild.categories if is_event_category_name(candidate.name)]
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda candidate: (-len(candidate.text_channels), candidate.id))
+    return candidates[0]
 
 
 def to_valid_channel_name(name: str) -> str:
@@ -51,18 +140,20 @@ def to_valid_channel_name(name: str) -> str:
 
 
 def build_event_channel_name(event_name: str, emoji: str) -> str:
-    return f"{emoji}|{event_name}"
+    return f"{emoji}|{with_mm_event_prefix(event_name)}"
 
 
 def extract_emoji_from_channel_name(channel_name: str) -> str | None:
     if "|" not in channel_name:
         return None
     prefix = channel_name.split("|", 1)[0].strip()
+    if prefix.lower().startswith(MM_EVENT_PREFIX):
+        prefix = prefix[len(MM_EVENT_PREFIX):].strip()
     return prefix or None
 
 
 def build_event_role_name(event_name: str, emoji: str) -> str:
-    return f"{emoji} {event_name}"
+    return f"{emoji} {with_mm_event_prefix(event_name)}"
 
 
 def extract_event_name_from_role_name(role_name: str) -> str:
@@ -76,6 +167,8 @@ def extract_emoji_from_role_name(role_name: str) -> str | None:
     parts = role_name.split(" ", 1)
     if len(parts) == 2:
         emoji = parts[0].strip()
+        if emoji.lower().startswith(MM_EVENT_PREFIX):
+            emoji = emoji[len(MM_EVENT_PREFIX):].strip()
         return emoji or None
     return None
 
@@ -83,7 +176,7 @@ def extract_emoji_from_role_name(role_name: str) -> str | None:
 def pick_default_event_emoji(event_name: str) -> str:
     event_key = normalize_event_key(event_name)
     if not EVENT_CHANNEL_EMOJIS:
-        return "🎯"
+        return "ðŸŽ¯"
     score = sum(ord(ch) for ch in event_key)
     return EVENT_CHANNEL_EMOJIS[score % len(EVENT_CHANNEL_EMOJIS)]
 
@@ -97,15 +190,18 @@ def get_event_setup_lock(event_key: str) -> asyncio.Lock:
 
 
 def find_event_role(guild: discord.Guild, event_name: str) -> discord.Role | None:
-    target_name = event_name.lower()
-    target_suffix = f" {target_name}"
+    base_name = event_name.strip().lower()
+    prefixed_name = with_mm_event_prefix(event_name).lower()
+    suffixes = {f" {base_name}", f" {prefixed_name}"}
+    exact_names = {base_name, prefixed_name}
 
     for role in guild.roles:
-        if role.name.lower().endswith(target_suffix):
+        role_name = role.name.lower()
+        if any(role_name.endswith(suffix) for suffix in suffixes):
             return role
 
     for role in guild.roles:
-        if role.name.lower() == target_name:
+        if role.name.lower() in exact_names:
             return role
 
     return None
@@ -118,7 +214,9 @@ def find_event_channel(
     role: discord.Role | None = None,
 ) -> discord.TextChannel | None:
     target_event = event_name.lower()
+    prefixed_event = with_mm_event_prefix(event_name).lower()
     safe_event_tail = to_valid_channel_name(event_name)
+    safe_prefixed_tail = to_valid_channel_name(with_mm_event_prefix(event_name))
     best_match = None
     best_score = -1
 
@@ -130,16 +228,21 @@ def find_event_channel(
 
         if category is not None and channel.category and channel.category.id == category.id:
             score += 5
-        if channel_name.endswith(f"|{target_event}"):
+        if channel_name.endswith(f"|{target_event}") or channel_name.endswith(f"|{prefixed_event}"):
             score += 6
             has_event_match = True
-        if channel_name.endswith(f"|{safe_event_tail}"):
+        if channel_name.endswith(f"|{safe_event_tail}") or channel_name.endswith(f"|{safe_prefixed_tail}"):
             score += 5
             has_event_match = True
-        if channel_name.endswith(f"-{safe_event_tail}") or channel_name == safe_event_tail:
+        if (
+            channel_name.endswith(f"-{safe_event_tail}")
+            or channel_name == safe_event_tail
+            or channel_name.endswith(f"-{safe_prefixed_tail}")
+            or channel_name == safe_prefixed_tail
+        ):
             score += 4
             has_event_match = True
-        if channel_safe.endswith(safe_event_tail):
+        if channel_safe.endswith(safe_event_tail) or channel_safe.endswith(safe_prefixed_tail):
             score += 2
             has_event_match = True
         if role is not None and role in channel.overwrites:
@@ -170,7 +273,7 @@ def find_event_channel_for_role_name(guild: discord.Guild, role_name: str) -> di
     # Fallback: deduire le nom de l'event depuis le role.
     event_name = extract_event_name_from_role_name(role_name)
     role = discord.utils.get(guild.roles, name=role_name)
-    category = discord.utils.get(guild.categories, name=EVENT_CATEGORY_NAME)
+    category = find_event_category(guild)
     return find_event_channel(guild, category, event_name, role=role)
 
 
@@ -202,7 +305,7 @@ def resolve_event_entities(guild: discord.Guild, event_name: str) -> tuple[disco
     event_key = normalize_event_key(event_name)
     tracked = event_resources.get(event_key)
 
-    category = discord.utils.get(guild.categories, name=EVENT_CATEGORY_NAME)
+    category = find_event_category(guild)
     event_channel = None
     role = None
 
@@ -249,15 +352,22 @@ async def ensure_event_setup(guild: discord.Guild, event_name: str) -> tuple[dis
     lock = get_event_setup_lock(event_key)
 
     async with lock:
-        category = discord.utils.get(guild.categories, name=EVENT_CATEGORY_NAME)
+        category = find_event_category(guild)
         if category is None:
             category = await guild.create_category(EVENT_CATEGORY_NAME)
             print(f"Categorie '{EVENT_CATEGORY_NAME}' creee !")
+        elif category.name != EVENT_CATEGORY_NAME:
+            try:
+                previous_category_name = category.name
+                await category.edit(name=EVENT_CATEGORY_NAME)
+                print(f"Categorie '{previous_category_name}' renommee en '{EVENT_CATEGORY_NAME}'.")
+            except discord.HTTPException:
+                pass
 
         event_channel = find_event_channel(guild, category, event_name)
 
         event_emoji = extract_emoji_from_channel_name(event_channel.name) if event_channel else None
-        if not event_emoji:
+        if not event_emoji or event_emoji not in EVENT_CHANNEL_EMOJIS:
             event_emoji = pick_default_event_emoji(event_name)
 
         role_name = build_event_role_name(event_name, event_emoji)
@@ -279,7 +389,7 @@ async def ensure_event_setup(guild: discord.Guild, event_name: str) -> tuple[dis
             if role is not None:
                 role_name = role.name
                 role_emoji = extract_emoji_from_role_name(role_name)
-                if role_emoji:
+                if role_emoji and role_emoji in EVENT_CHANNEL_EMOJIS:
                     event_emoji = role_emoji
 
         # Rafraichit une fois depuis l'API avant creation: utile en multi-instance.
@@ -301,10 +411,25 @@ async def ensure_event_setup(guild: discord.Guild, event_name: str) -> tuple[dis
                     if role is not None:
                         role_name = role.name
                         role_emoji = extract_emoji_from_role_name(role_name)
-                        if role_emoji:
+                        if role_emoji and role_emoji in EVENT_CHANNEL_EMOJIS:
                             event_emoji = role_emoji
             except discord.HTTPException:
                 pass
+
+        target_role_name = build_event_role_name(event_name, event_emoji)
+        if role is not None:
+            if role.name != target_role_name:
+                try:
+                    previous_role_name = role.name
+                    await role.edit(name=target_role_name)
+                    role_name = target_role_name
+                    print(f"Role '{previous_role_name}' renomme en '{target_role_name}' !")
+                except discord.HTTPException:
+                    role_name = role.name
+            else:
+                role_name = target_role_name
+        else:
+            role_name = target_role_name
 
         if role is None:
             role = await guild.create_role(
@@ -401,6 +526,198 @@ async def delete_event_resources(
     return deleted_labels
 
 
+def get_moomle_storage_path() -> str:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, MOOMLE_STORAGE_FILE)
+
+
+def load_moomle_polls_from_disk() -> dict[str, dict[str, dict]]:
+    path = get_moomle_storage_path()
+    if not os.path.exists(path):
+        return {}
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except (OSError, json.JSONDecodeError) as error:
+        print(f"Erreur chargement moomle ({path}): {error}")
+        return {}
+
+    if not isinstance(payload, dict):
+        return {}
+
+    sanitized: dict[str, dict[str, dict]] = {}
+    for guild_id, polls in payload.items():
+        if not isinstance(guild_id, str) or not isinstance(polls, dict):
+            continue
+
+        sanitized_polls: dict[str, dict] = {}
+        for poll_key, poll_data in polls.items():
+            if isinstance(poll_key, str) and isinstance(poll_data, dict):
+                sanitized_polls[poll_key] = poll_data
+
+        if sanitized_polls:
+            sanitized[guild_id] = sanitized_polls
+
+    return sanitized
+
+
+def save_moomle_polls_to_disk(payload: dict[str, dict[str, dict]]):
+    path = get_moomle_storage_path()
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(payload, file, ensure_ascii=False, indent=2)
+    except OSError as error:
+        print(f"Erreur sauvegarde moomle ({path}): {error}")
+
+
+def normalize_poll_key(name: str) -> str:
+    return normalize_event_key(name)
+
+
+def build_slot_emoji_to_index(slots: list[str]) -> dict[str, str]:
+    max_len = min(len(slots), len(MOOMLE_SLOT_REACTION_EMOJIS))
+    mapping = {}
+    for index in range(max_len):
+        mapping[MOOMLE_SLOT_REACTION_EMOJIS[index]] = str(index + 1)
+    return mapping
+
+
+def render_slot_lines_with_emojis(slots: list[str]) -> list[str]:
+    lines = []
+    for index, slot_label in enumerate(slots, start=1):
+        emoji = MOOMLE_SLOT_REACTION_EMOJIS[index - 1] if index - 1 < len(MOOMLE_SLOT_REACTION_EMOJIS) else "•"
+        lines.append(f"{emoji} {index}. {slot_label}")
+    return lines
+
+
+def find_poll_by_message_id(guild_polls: dict[str, dict], message_id: int) -> tuple[str, dict] | tuple[None, None]:
+    for poll_key, poll in guild_polls.items():
+        if poll.get("message_id") == message_id:
+            return poll_key, poll
+    return None, None
+
+
+def parse_semicolon_values(raw_value: str) -> list[str]:
+    values = []
+    for chunk in raw_value.split(";"):
+        value = chunk.strip()
+        if value:
+            values.append(value)
+    return values
+
+
+def get_session_display_name(role_name: str) -> str:
+    extracted_event_name = extract_event_name_from_role_name(role_name)
+    if extracted_event_name:
+        return extracted_event_name
+    return role_name
+
+
+def extract_event_name_from_channel_name(channel_name: str) -> str:
+    if "|" in channel_name:
+        return channel_name.split("|", 1)[1].strip()
+    return channel_name.strip()
+
+
+def list_moomle_session_roles(guild: discord.Guild) -> list[discord.Role]:
+    roles_by_id: dict[int, discord.Role] = {}
+    category = find_event_category(guild)
+
+    for role in guild.roles:
+        if role.is_default():
+            continue
+        if role.name.lower().startswith(MM_EVENT_PREFIX):
+            roles_by_id[role.id] = role
+
+    if category is not None:
+        for channel in category.text_channels:
+            event_name = extract_event_name_from_channel_name(channel.name)
+            if event_name:
+                role = find_event_role(guild, event_name)
+                if role is not None:
+                    roles_by_id[role.id] = role
+                    continue
+
+            for overwrite_target, overwrite in channel.overwrites.items():
+                if not isinstance(overwrite_target, discord.Role):
+                    continue
+                if overwrite_target.is_default():
+                    continue
+                if overwrite.view_channel is False:
+                    continue
+                roles_by_id[overwrite_target.id] = overwrite_target
+
+    for tracked in event_resources.values():
+        role_name = tracked.get("role_name")
+        if not isinstance(role_name, str):
+            continue
+        role = discord.utils.get(guild.roles, name=role_name)
+        if role is not None:
+            roles_by_id[role.id] = role
+
+    roles = list(roles_by_id.values())
+    roles.sort(key=lambda role: get_session_display_name(role.name).lower())
+    return roles
+
+
+async def handle_moomle_reaction_vote(payload: discord.RawReactionActionEvent, is_add: bool) -> bool:
+    guild_id = payload.guild_id
+    if guild_id is None:
+        return False
+
+    guild = bot.get_guild(guild_id)
+    if guild is None:
+        return False
+
+    member = payload.member
+    if member is None:
+        member = guild.get_member(payload.user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(payload.user_id)
+            except discord.HTTPException:
+                member = None
+
+    if member is not None and member.bot:
+        return False
+
+    guild_key = str(guild_id)
+    emoji_text = str(payload.emoji)
+
+    async with moomle_lock:
+        guild_polls = moomle_polls.get(guild_key, {})
+        poll_key, poll = find_poll_by_message_id(guild_polls, payload.message_id)
+        if poll is None:
+            return False
+
+        slots = poll.get("slots", [])
+        emoji_to_slot = build_slot_emoji_to_index(slots)
+        slot_key = emoji_to_slot.get(emoji_text)
+        if slot_key is None:
+            return True
+
+        votes = poll.setdefault("votes", {})
+        user_key = str(payload.user_id)
+        user_votes = votes.setdefault(user_key, {})
+
+        if is_add:
+            user_votes[slot_key] = True
+        else:
+            user_votes.pop(slot_key, None)
+            if not user_votes:
+                votes.pop(user_key, None)
+
+        if poll_key is not None:
+            guild_polls[poll_key] = poll
+        save_moomle_polls_to_disk(moomle_polls)
+
+    return True
+
+
+moomle_polls = load_moomle_polls_from_disk()
+
+
 class DeleteConfirmView(discord.ui.View):
     def __init__(self, author_id: int):
         super().__init__(timeout=30)
@@ -443,6 +760,14 @@ async def on_ready():
             synced = await bot.tree.sync(guild=discord.Object(id=GUILD_ID))
             print(f"Slash commands sync (guild {GUILD_ID}): {len(synced)}")
         else:
+            for guild in bot.guilds:
+                try:
+                    # Nettoie les anciennes commandes "guild-scoped" pour eviter les doublons
+                    # quand des commandes globales existent aussi.
+                    bot.tree.clear_commands(guild=guild)
+                    await bot.tree.sync(guild=guild)
+                except Exception as guild_error:
+                    print(f"Echec nettoyage slash commands guild {guild.id}: {guild_error}")
             synced = await bot.tree.sync()
             print(f"Slash commands sync globaux: {len(synced)}")
         commands_synced = True
@@ -454,6 +779,10 @@ async def on_ready():
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     try:
         if bot.user and payload.user_id == bot.user.id:
+            return
+
+        moomle_handled = await handle_moomle_reaction_vote(payload, is_add=True)
+        if moomle_handled:
             return
 
         if str(payload.emoji) != CHECK_EMOJI:
@@ -502,6 +831,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     try:
         if bot.user and payload.user_id == bot.user.id:
+            return
+
+        moomle_handled = await handle_moomle_reaction_vote(payload, is_add=False)
+        if moomle_handled:
             return
 
         if str(payload.emoji) != CHECK_EMOJI:
@@ -673,6 +1006,422 @@ async def delete_event_slash(interaction: discord.Interaction, event_name: str):
                 pass
 
 
+def pick_maximal_sessions(feasible_sessions: list[dict]) -> list[dict]:
+    maximal_sessions = []
+
+    for session in feasible_sessions:
+        required_users = session["required_user_ids"]
+        has_strict_superset = any(
+            required_users < other_session["required_user_ids"] for other_session in feasible_sessions
+        )
+        if not has_strict_superset:
+            maximal_sessions.append(session)
+
+    deduped = []
+    seen_signatures: set[tuple[int, tuple[int, ...]]] = set()
+    for session in maximal_sessions:
+        signature = (session["role_id"], tuple(sorted(session["required_user_ids"])))
+        if signature in seen_signatures:
+            continue
+        seen_signatures.add(signature)
+        deduped.append(session)
+
+    return deduped
+
+
+async def get_poll_copy(guild_id: int, poll_name: str) -> tuple[dict | None, str]:
+    poll_key = normalize_poll_key(poll_name)
+    guild_key = str(guild_id)
+
+    async with moomle_lock:
+        guild_polls = moomle_polls.get(guild_key, {})
+        poll = guild_polls.get(poll_key)
+        if poll is None:
+            return None, poll_key
+        return json.loads(json.dumps(poll)), poll_key
+
+
+@bot.tree.command(name="moomle_create", description="Cree un sondage de disponibilites (sessions detectees automatiquement).")
+@app_commands.rename(poll_name="periode", slots="date")
+@app_commands.describe(
+    poll_name="Periode (exemple: campagne-avril)",
+    slots="Date(s) separee(s) par ; (ex: 2026-04-20 20:00;2026-04-23 20:00)",
+)
+async def moomle_create_slash(
+    interaction: discord.Interaction,
+    poll_name: str,
+    slots: str,
+):
+    try:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Cette commande doit etre utilisee sur un serveur.",
+                ephemeral=True,
+            )
+            return
+
+        parsed_slots = parse_semicolon_values(slots)
+        poll_key = normalize_poll_key(poll_name)
+        guild_key = str(interaction.guild.id)
+
+        if not poll_key:
+            await interaction.response.send_message("Le nom du sondage est vide.", ephemeral=True)
+            return
+        if len(parsed_slots) == 0:
+            await interaction.response.send_message("Ajoute au moins un creneau.", ephemeral=True)
+            return
+        if len(parsed_slots) > MAX_MOOMLE_SLOTS:
+            await interaction.response.send_message(
+                f"Trop de creneaux (max {MAX_MOOMLE_SLOTS}).",
+                ephemeral=True,
+            )
+            return
+        if len(parsed_slots) > len(MOOMLE_SLOT_REACTION_EMOJIS):
+            await interaction.response.send_message(
+                f"Trop de creneaux pour les reactions disponibles (max {len(MOOMLE_SLOT_REACTION_EMOJIS)}).",
+                ephemeral=True,
+            )
+            return
+
+        detected_session_roles = list_moomle_session_roles(interaction.guild)
+        role_ids = [role.id for role in detected_session_roles[:MAX_MOOMLE_SESSIONS]]
+
+        async with moomle_lock:
+            guild_polls = moomle_polls.setdefault(guild_key, {})
+            if poll_key in guild_polls:
+                await interaction.response.send_message(
+                    f"Un sondage `{poll_name}` existe deja.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_polls[poll_key] = {
+                "name": poll_name.strip(),
+                "created_by": interaction.user.id,
+                "channel_id": interaction.channel_id,
+                "message_id": None,
+                "session_role_ids": role_ids,
+                "slots": parsed_slots,
+                "votes": {},
+            }
+            save_moomle_polls_to_disk(moomle_polls)
+
+        session_labels = []
+        for role_id in role_ids:
+            role = interaction.guild.get_role(role_id)
+            if role is not None:
+                session_labels.append(f"`{get_session_display_name(role.name)}`")
+
+        slot_lines = render_slot_lines_with_emojis(parsed_slots)
+        embed = discord.Embed(
+            title=f"Sondage moomle: {poll_name.strip()}",
+            description=(
+                "Sessions detectees automatiquement depuis tes events (si disponibles).\n"
+                "Votez en reagissant avec les lettres en bas du message."
+            ),
+            color=discord.Color.blurple(),
+        )
+        embed.add_field(name="Sessions", value=", ".join(session_labels) if session_labels else "Aucune", inline=False)
+        embed.add_field(name="Creneaux", value="\n".join(slot_lines)[:1024], inline=False)
+        embed.set_footer(text="Puis lancez /moomle_suggest pour proposer automatiquement les sessions.")
+
+        await interaction.response.send_message(embed=embed)
+        poll_message = await interaction.original_response()
+
+        for slot_index in range(len(parsed_slots)):
+            await poll_message.add_reaction(MOOMLE_SLOT_REACTION_EMOJIS[slot_index])
+
+        async with moomle_lock:
+            guild_polls = moomle_polls.get(guild_key, {})
+            stored_poll = guild_polls.get(poll_key)
+            if stored_poll is not None:
+                stored_poll["message_id"] = poll_message.id
+                guild_polls[poll_key] = stored_poll
+                save_moomle_polls_to_disk(moomle_polls)
+
+    except Exception as error:
+        print(f"Erreur slash /moomle_create : {error}")
+        if interaction.response.is_done():
+            await interaction.followup.send("Une erreur est survenue pendant la creation du moomle.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Une erreur est survenue pendant la creation du moomle.",
+                ephemeral=True,
+            )
+
+
+@bot.tree.command(name="moomle_status", description="Affiche l'etat du sondage de disponibilites.")
+@app_commands.rename(poll_name="periode")
+@app_commands.describe(poll_name="Periode")
+async def moomle_status_slash(interaction: discord.Interaction, poll_name: str):
+    try:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Cette commande doit etre utilisee sur un serveur.",
+                ephemeral=True,
+            )
+            return
+
+        poll, _ = await get_poll_copy(interaction.guild.id, poll_name)
+        if poll is None:
+            await interaction.response.send_message(
+                f"Sondage `{poll_name}` introuvable.",
+                ephemeral=True,
+            )
+            return
+
+        slots: list[str] = poll.get("slots", [])
+        votes: dict[str, dict[str, bool]] = poll.get("votes", {})
+        respondents = {int(user_id) for user_id in votes.keys() if str(user_id).isdigit()}
+
+        session_names = []
+        for role_id in poll.get("session_role_ids", []):
+            role = interaction.guild.get_role(role_id)
+            if role is not None:
+                session_names.append(f"`{get_session_display_name(role.name)}`")
+
+        lines = []
+        for index, slot_label in enumerate(slots, start=1):
+            slot_key = str(index)
+            slot_emoji = MOOMLE_SLOT_REACTION_EMOJIS[index - 1] if index - 1 < len(MOOMLE_SLOT_REACTION_EMOJIS) else "•"
+            yes_ids = [
+                int(user_id)
+                for user_id, user_votes in votes.items()
+                if str(user_id).isdigit() and user_votes.get(slot_key) is True
+            ]
+            yes_mentions = ", ".join(f"<@{user_id}>" for user_id in yes_ids[:8])
+            if len(yes_ids) > 8:
+                yes_mentions += ", ..."
+            if not yes_mentions:
+                yes_mentions = "personne"
+            lines.append(f"{slot_emoji} {index}. {slot_label} -> {len(yes_ids)} dispo ({yes_mentions})")
+
+        embed = discord.Embed(
+            title=f"Etat moomle: {poll.get('name', poll_name)}",
+            color=discord.Color.green(),
+            description=f"Repondants: **{len(respondents)}**",
+        )
+        embed.add_field(name="Sessions cibles", value=", ".join(session_names) if session_names else "Aucune", inline=False)
+        embed.add_field(name="Creneaux", value="\n".join(lines)[:1024] if lines else "Aucun", inline=False)
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    except Exception as error:
+        print(f"Erreur slash /moomle_status : {error}")
+        if interaction.response.is_done():
+            await interaction.followup.send("Une erreur est survenue pendant la lecture du moomle.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Une erreur est survenue pendant la lecture du moomle.",
+                ephemeral=True,
+            )
+
+
+@bot.tree.command(name="moomle_delete", description="Supprime un sondage moomle.")
+@app_commands.rename(poll_name="periode")
+@app_commands.describe(poll_name="Periode")
+async def moomle_delete_slash(interaction: discord.Interaction, poll_name: str):
+    try:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Cette commande doit etre utilisee sur un serveur.",
+                ephemeral=True,
+            )
+            return
+
+        poll_key = normalize_poll_key(poll_name)
+        guild_key = str(interaction.guild.id)
+
+        async with moomle_lock:
+            guild_polls = moomle_polls.get(guild_key, {})
+            removed_poll = guild_polls.pop(poll_key, None)
+            if removed_poll is None:
+                await interaction.response.send_message(
+                    f"Sondage `{poll_name}` introuvable.",
+                    ephemeral=True,
+                )
+                return
+
+            save_moomle_polls_to_disk(moomle_polls)
+
+        deleted_message = False
+        channel_id = removed_poll.get("channel_id")
+        message_id = removed_poll.get("message_id")
+
+        if isinstance(channel_id, int) and isinstance(message_id, int):
+            channel = interaction.guild.get_channel(channel_id)
+            if channel is None:
+                try:
+                    channel = await interaction.guild.fetch_channel(channel_id)
+                except discord.HTTPException:
+                    channel = None
+
+            if isinstance(channel, discord.TextChannel):
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.delete(reason=f"Suppression moomle '{poll_name}' par {interaction.user}")
+                    deleted_message = True
+                except discord.HTTPException:
+                    deleted_message = False
+
+        if deleted_message:
+            await interaction.response.send_message(
+                f"Sondage `{poll_name}` supprime (message retire).",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"Sondage `{poll_name}` supprime.",
+                ephemeral=True,
+            )
+
+    except Exception as error:
+        print(f"Erreur slash /moomle_delete : {error}")
+        if interaction.response.is_done():
+            await interaction.followup.send("Une erreur est survenue pendant la suppression du moomle.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Une erreur est survenue pendant la suppression du moomle.",
+                ephemeral=True,
+            )
+
+
+@bot.tree.command(
+    name="moomle_suggest",
+    description="Propose automatiquement les sessions qui matchent les disponibilites.",
+)
+@app_commands.rename(poll_name="periode")
+@app_commands.describe(poll_name="Periode")
+async def moomle_suggest_slash(interaction: discord.Interaction, poll_name: str):
+    try:
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Cette commande doit etre utilisee sur un serveur.",
+                ephemeral=True,
+            )
+            return
+
+        poll, _ = await get_poll_copy(interaction.guild.id, poll_name)
+        if poll is None:
+            await interaction.response.send_message(
+                f"Sondage `{poll_name}` introuvable.",
+                ephemeral=True,
+            )
+            return
+
+        slots: list[str] = poll.get("slots", [])
+        votes: dict[str, dict[str, bool]] = poll.get("votes", {})
+        respondents: set[int] = {int(user_id) for user_id in votes.keys() if str(user_id).isdigit()}
+
+        if len(respondents) == 0:
+            await interaction.response.send_message(
+                "Aucun vote enregistre pour l'instant.",
+                ephemeral=True,
+            )
+            return
+
+        candidate_roles_by_id: dict[int, discord.Role] = {}
+        for role in list_moomle_session_roles(interaction.guild):
+            candidate_roles_by_id[role.id] = role
+        for role_id in poll.get("session_role_ids", []):
+            role = interaction.guild.get_role(role_id)
+            if role is not None:
+                candidate_roles_by_id[role.id] = role
+
+        sessions = []
+        for role in candidate_roles_by_id.values():
+            role_member_ids = {member.id for member in role.members if not member.bot}
+            required_user_ids = role_member_ids & respondents
+            if len(required_user_ids) == 0:
+                continue
+
+            sessions.append(
+                {
+                    "role_id": role.id,
+                    "role_name": role.name,
+                    "required_user_ids": required_user_ids,
+                }
+            )
+
+        if len(sessions) == 0:
+            await interaction.response.send_message(
+                "Aucun role de session detecte chez les personnes ayant repondu au sondage.",
+                ephemeral=True,
+            )
+            return
+
+        suggestion_lines = []
+        for slot_index, slot_label in enumerate(slots, start=1):
+            slot_key = str(slot_index)
+            slot_emoji = (
+                MOOMLE_SLOT_REACTION_EMOJIS[slot_index - 1]
+                if slot_index - 1 < len(MOOMLE_SLOT_REACTION_EMOJIS)
+                else "•"
+            )
+            available_user_ids = {
+                int(user_id)
+                for user_id, user_votes in votes.items()
+                if str(user_id).isdigit() and user_votes.get(slot_key) is True
+            }
+
+            feasible_sessions = [
+                session
+                for session in sessions
+                if session["required_user_ids"] and session["required_user_ids"].issubset(available_user_ids)
+            ]
+
+            if len(feasible_sessions) == 0:
+                suggestion_lines.append(f"{slot_emoji} {slot_index}. {slot_label} -> aucune session")
+                continue
+
+            selected_sessions = pick_maximal_sessions(feasible_sessions)
+            selected_sessions.sort(key=lambda session: (-len(session["required_user_ids"]), session["role_name"].lower()))
+
+            rendered_sessions = []
+            for session in selected_sessions:
+                player_mentions = ", ".join(f"<@{user_id}>" for user_id in sorted(session["required_user_ids"]))
+                rendered_sessions.append(
+                    f"`{get_session_display_name(session['role_name'])}` ({len(session['required_user_ids'])} joueurs: {player_mentions})"
+                )
+
+            suggestion_lines.append(f"{slot_emoji} {slot_index}. {slot_label} -> " + " | ".join(rendered_sessions))
+
+        embed = discord.Embed(
+            title=f"Propositions auto: {poll.get('name', poll_name)}",
+            description=(
+                "Regle appliquee: on garde uniquement les sessions maximales (si une session plus large est possible, "
+                "les sous-sessions sont ignorees)."
+            ),
+            color=discord.Color.gold(),
+        )
+
+        chunk = []
+        chunk_length = 0
+        for line in suggestion_lines:
+            candidate = len(line) + 1
+            if chunk_length + candidate > 1000 and chunk:
+                embed.add_field(name="Resultats", value="\n".join(chunk), inline=False)
+                chunk = [line]
+                chunk_length = candidate
+            else:
+                chunk.append(line)
+                chunk_length += candidate
+        if chunk:
+            embed.add_field(name="Resultats", value="\n".join(chunk), inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+    except Exception as error:
+        print(f"Erreur slash /moomle_suggest : {error}")
+        if interaction.response.is_done():
+            await interaction.followup.send("Une erreur est survenue pendant le calcul du moomle.", ephemeral=True)
+        else:
+            await interaction.response.send_message(
+                "Une erreur est survenue pendant le calcul du moomle.",
+                ephemeral=True,
+            )
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     print(f"Erreur slash command: {error}")
@@ -707,4 +1456,10 @@ def run_health_server():
 if os.environ.get("PORT"):
     threading.Thread(target=run_health_server, daemon=True).start()
 
+if not TOKEN:
+    raise RuntimeError(
+        "Token Discord manquant. Definis la variable d'environnement DISCORD_TOKEN (ou TOKEN) avant de lancer le bot."
+    )
+
 bot.run(TOKEN)
+
