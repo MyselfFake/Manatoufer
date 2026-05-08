@@ -35,6 +35,7 @@ def build_moomle_poll_embed(
     duration_hours: int | None,
     color: discord.Color,
     reaction_emojis: list[str],
+    use_event_sessions: bool = True,
 ) -> discord.Embed:
     slot_lines = render_slot_lines_with_emojis(slots, reaction_emojis)
     respondents = [user_id for user_id in votes.keys() if str(user_id).isdigit()]
@@ -59,12 +60,20 @@ def build_moomle_poll_embed(
     avg_text = f"{avg_votes:.1f}".replace(".", ",")
     percent_text = f"{avg_percent:.0f}"
 
-    embed = discord.Embed(
-        title=f"Sondage moomle: {poll_name}",
-        description=(
+    if use_event_sessions:
+        description = (
             "Sessions detectees automatiquement depuis tes events (si disponibles).\n"
             "Votez en reagissant avec les lettres en bas du message."
-        ),
+        )
+    else:
+        description = (
+            "Mode sans events: les suggestions se basent uniquement sur les votants disponibles.\n"
+            "Votez en reagissant avec les lettres en bas du message."
+        )
+
+    embed = discord.Embed(
+        title=f"Sondage moomle: {poll_name}",
+        description=description,
         color=color,
     )
     embed.add_field(name="Sessions", value=", ".join(session_labels) if session_labels else "Aucune", inline=False)
@@ -84,18 +93,31 @@ def build_moomle_poll_embed(
         inline=False,
     )
     embed.add_field(name="Votants (nb de votes)", value=voters_preview[:1024], inline=False)
-    embed.set_footer(text="Puis lancez /moomle_pool_suggest pour proposer automatiquement les sessions.")
+    if use_event_sessions:
+        embed.set_footer(text="Puis lancez /moomle_pool_suggest pour proposer automatiquement les sessions.")
+    else:
+        embed.set_footer(text="Puis lancez /moomle_pool_suggest pour proposer automatiquement les disponibilites.")
     return embed
 
 
-def build_moomle_suggest_embed(poll: dict, suggestion_lines: list[str], is_automatic: bool) -> discord.Embed:
+def build_moomle_suggest_embed(
+    poll: dict,
+    suggestion_lines: list[str],
+    is_automatic: bool,
+    use_event_sessions: bool = True,
+) -> discord.Embed:
     title_prefix = "Propositions auto (fin sondage): " if is_automatic else "Propositions auto: "
-    embed = discord.Embed(
-        title=f"{title_prefix}{poll.get('name', 'Moomle')}",
-        description=(
+    if use_event_sessions:
+        description = (
             "Regle appliquee: on garde uniquement les sessions maximales (si une session plus large est possible, "
             "les sous-sessions sont ignorees)."
-        ),
+        )
+    else:
+        description = "Mode sans events: chaque creneau affiche les votants disponibles ensemble."
+
+    embed = discord.Embed(
+        title=f"{title_prefix}{poll.get('name', 'Moomle')}",
+        description=description,
         color=discord.Color.gold(),
     )
 
@@ -114,4 +136,3 @@ def build_moomle_suggest_embed(poll: dict, suggestion_lines: list[str], is_autom
         embed.add_field(name="Resultats", value="\n".join(chunk), inline=False)
 
     return embed
-

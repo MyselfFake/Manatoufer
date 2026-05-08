@@ -59,7 +59,16 @@ python manatoufer.py
 |  |- app.py
 |  |- features/
 |     |- events.py
+|     |- events_state.py
+|     |- events_core.py
+|     |- events_commands.py
+|     |- events_reactions.py
 |     |- moomle.py
+|     |- moomle_state.py
+|     |- moomle_formatting_helpers.py
+|     |- moomle_logic.py
+|     |- moomle_runtime.py
+|     |- moomle_commands.py
 ```
 
 ## Notes de partage (bonnes pratiques)
