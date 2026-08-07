@@ -2,6 +2,30 @@ import os
 import discord
 
 
+def load_local_env_file():
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env_path = os.path.join(project_root, ".env")
+    if not os.path.exists(env_path):
+        return
+
+    try:
+        with open(env_path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except OSError as error:
+        print(f"Impossible de charger .env: {error}")
+
+
+load_local_env_file()
+
 TOKEN = (os.environ.get("DISCORD_TOKEN") or os.environ.get("TOKEN") or "").strip()
 
 GUILD_ID_RAW = os.environ.get("GUILD_ID")
@@ -29,10 +53,15 @@ DELETE_CANCEL_EMOJI = "\u274C"
 EVENT_CHANNEL_WELCOME_MESSAGE = "C'est ici que vous pouvez echanger et vous organiser pour cet evenement."
 
 MOOMLE_STORAGE_FILE = "moomle_polls.json"
+MROLE_STORAGE_FILE = "mrole_reacts.json"
+TWITCH_STORAGE_FILE = "twitch_notifications.json"
 MAX_MOOMLE_SLOTS = 20
 MAX_MOOMLE_SESSIONS = 25
 MAX_MOOMLE_DURATION_HOURS = 720
 MOOMLE_AUTO_SUGGEST_CHECK_SECONDS = 30
+TWITCH_CHECK_SECONDS = int(os.environ.get("TWITCH_CHECK_SECONDS", "60"))
+TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID", "").strip()
+TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET", "").strip()
 MM_EVENT_PREFIX = "mm_"
 MOOMLE_SLOT_REACTION_EMOJIS = [
     "🇦",
@@ -65,4 +94,3 @@ def build_intents() -> discord.Intents:
     intents.messages = True
     intents.message_content = False
     return intents
-
