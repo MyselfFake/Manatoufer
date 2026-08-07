@@ -10,4 +10,3 @@ bot = commands.Bot(command_prefix=commands.when_mentioned, intents=intents)
 
 commands_synced = False
 moomle_auto_suggest_task: asyncio.Task | None = None
-twitch_live_notify_task: asyncio.Task | None = None

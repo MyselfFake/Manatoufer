@@ -10,6 +10,7 @@ from botcore.features.events_core import (
     rename_event_resources,
     resolve_event_entities,
 )
+from botcore.permissions import can_member_target_role
 from botcore.runtime import bot
 from botcore.views import DeleteConfirmView
 
@@ -111,6 +112,14 @@ async def change_event_slash(
             )
             return
 
+        event_channel, role, _ = resolve_event_entities(interaction.guild, old_name)
+        if role is not None and not can_member_target_role(interaction.user, role):
+            await interaction.response.send_message(
+                "Tu ne peux pas renommer cet événement : son rôle n'est pas strictement en dessous de l'un de tes rôles hiérarchiques.",
+                ephemeral=True,
+            )
+            return
+
         success, result_message = await rename_event_resources(
             interaction.guild,
             old_name,
@@ -149,6 +158,13 @@ async def delete_event_slash(interaction: discord.Interaction, event_name: str):
         if event_channel is None and role is None:
             await interaction.response.send_message(
                 f"Aucun event trouve pour `{event_name}`.",
+                ephemeral=True,
+            )
+            return
+
+        if role is not None and not can_member_target_role(interaction.user, role):
+            await interaction.response.send_message(
+                "Tu ne peux pas supprimer cet événement : son rôle n'est pas strictement en dessous de l'un de tes rôles hiérarchiques.",
                 ephemeral=True,
             )
             return

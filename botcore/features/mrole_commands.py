@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 
 from botcore.features.mrole_state import register_mrole_message
+from botcore.permissions import can_member_target_role
 from botcore.runtime import bot
 
 
@@ -60,6 +61,9 @@ async def mrole_react_slash(interaction: discord.Interaction, message: str, asso
             )
             return
 
+        if interaction.user is not None and not isinstance(interaction.user, discord.User):
+            pass
+
         try:
             pairs = parse_emoji_role_pairs(associations)
         except ValueError as error:
@@ -94,6 +98,12 @@ async def mrole_react_slash(interaction: discord.Interaction, message: str, asso
         unmanaged_roles = []
         for emoji, role_name in pairs:
             role = discord.utils.get(interaction.guild.roles, name=role_name)
+            if role is not None and not can_member_target_role(interaction.user, role):
+                await interaction.response.send_message(
+                    f"Tu ne peux pas gérer le rôle `{role.name}` : il n'est pas strictement en dessous de l'un de tes rôles hiérarchiques.",
+                    ephemeral=True,
+                )
+                return
             if role is None:
                 role = await interaction.guild.create_role(
                     name=role_name,

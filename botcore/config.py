@@ -54,14 +54,10 @@ EVENT_CHANNEL_WELCOME_MESSAGE = "C'est ici que vous pouvez echanger et vous orga
 
 MOOMLE_STORAGE_FILE = "moomle_polls.json"
 MROLE_STORAGE_FILE = "mrole_reacts.json"
-TWITCH_STORAGE_FILE = "twitch_notifications.json"
 MAX_MOOMLE_SLOTS = 20
 MAX_MOOMLE_SESSIONS = 25
 MAX_MOOMLE_DURATION_HOURS = 720
 MOOMLE_AUTO_SUGGEST_CHECK_SECONDS = 30
-TWITCH_CHECK_SECONDS = int(os.environ.get("TWITCH_CHECK_SECONDS", "60"))
-TWITCH_CLIENT_ID = os.environ.get("TWITCH_CLIENT_ID", "").strip()
-TWITCH_CLIENT_SECRET = os.environ.get("TWITCH_CLIENT_SECRET", "").strip()
 MM_EVENT_PREFIX = "mm_"
 MOOMLE_SLOT_REACTION_EMOJIS = [
     "🇦",

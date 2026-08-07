@@ -10,11 +10,9 @@ from botcore.config import GUILD_ID, TOKEN
 from botcore.features import events as _events  # noqa: F401 - import side effects (slash commands)
 from botcore.features import mrole as _mrole  # noqa: F401 - import side effects (slash commands)
 from botcore.features import moomle as _moomle  # noqa: F401 - import side effects (slash commands)
-from botcore.features import twitch as _twitch  # noqa: F401 - import side effects (slash commands)
 from botcore.features.events import handle_event_reaction_add, handle_event_reaction_remove
 from botcore.features.mrole import handle_mrole_reaction
 from botcore.features.moomle import handle_moomle_reaction_vote, moomle_auto_suggest_loop
-from botcore.features.twitch import twitch_live_notify_loop
 from botcore.health import run_health_server
 from botcore.runtime import bot
 
@@ -26,10 +24,6 @@ async def on_ready():
     if runtime.moomle_auto_suggest_task is None or runtime.moomle_auto_suggest_task.done():
         runtime.moomle_auto_suggest_task = asyncio.create_task(moomle_auto_suggest_loop())
         print("Moomle auto-suggest scheduler demarre.")
-
-    if runtime.twitch_live_notify_task is None or runtime.twitch_live_notify_task.done():
-        runtime.twitch_live_notify_task = asyncio.create_task(twitch_live_notify_loop())
-        print("Twitch live scheduler demarre.")
 
     if runtime.commands_synced:
         return

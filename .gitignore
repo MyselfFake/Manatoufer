@@ -10,5 +10,4 @@
 .env.local
 moomle_polls.json
 mrole_reacts.json
-twitch_notifications.json
 __pycache__/

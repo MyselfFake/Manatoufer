@@ -21,7 +21,6 @@ Manatoufer aide a organiser des events et des disponibilites de jeu sur Discord:
 
 ### Roles et annonces
 - `/mrole_react`
-- `/mpub_twitch`
 
 ## Installation rapide
 
@@ -39,10 +38,6 @@ DISCORD_TOKEN=your_bot_token
 # optionnel
 GUILD_ID=123456789012345678
 PORT=19045
-# optionnel, pour /mpub_twitch
-TWITCH_CLIENT_ID=your_twitch_client_id
-TWITCH_CLIENT_SECRET=your_twitch_client_secret
-TWITCH_CHECK_SECONDS=60
 ```
 
 4. Lancer le bot:
@@ -58,7 +53,6 @@ python manatoufer.py
 |- manatoufer.py
 |- moomle_polls.json
 |- mrole_reacts.json
-|- twitch_notifications.json
 |- botcore/
 |  |- config.py
 |  |- storage.py
@@ -83,11 +77,6 @@ python manatoufer.py
 |     |- mrole_state.py
 |     |- mrole_commands.py
 |     |- mrole_reactions.py
-|     |- twitch.py
-|     |- twitch_state.py
-|     |- twitch_api.py
-|     |- twitch_commands.py
-|     |- twitch_runtime.py
 ```
 
 ## Notes de partage (bonnes pratiques)
